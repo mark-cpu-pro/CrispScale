@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Generate Entire Android Project Automatically
@@ -80,7 +80,7 @@ jobs:
           }
           EOF
 
-          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          cat << 'EOF' | sed 's/^          //' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
@@ -387,13 +387,10 @@ jobs:
           EOF
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Download NCNN Vulkan Engine & Real-CUGAN Sharp Model
         run: |
@@ -403,8 +400,8 @@ jobs:
           wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.param -O app/src/main/assets/cugan_sharp.param
           wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.bin -O app/src/main/assets/cugan_sharp.bin
 
-      - name: Install Gradle & Build APK
-        uses: gradle/actions/setup-gradle@v3
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
