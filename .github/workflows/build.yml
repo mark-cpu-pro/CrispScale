@@ -136,8 +136,8 @@ jobs:
               } else {
                   upscaler.opt.use_vulkan_compute = false;
               }
-              int ret1 = upscaler.load_param(mgr, "cugan_sharp.param");
-              int ret2 = upscaler.load_model(mgr, "cugan_sharp.bin");
+              int ret1 = upscaler.load_param(mgr, "model.param");
+              int ret2 = upscaler.load_model(mgr, "model.bin");
               model_loaded = (ret1 == 0 && ret2 == 0);
               return model_loaded ? JNI_TRUE : JNI_FALSE;
           }
@@ -149,7 +149,7 @@ jobs:
               void* inPixels;
               if (AndroidBitmap_lockPixels(env, inBitmap, &inPixels) < 0) return nullptr;
 
-              int w = info.width, h = info.height, scale = 2;
+              int w = info.width, h = info.height, scale = 4;
               int outW = w * scale, outH = h * scale;
 
               ncnn::Mat in = ncnn::Mat::from_pixels((const unsigned char*)inPixels, ncnn::Mat::PIXEL_RGBA2RGB, w, h);
@@ -168,8 +168,8 @@ jobs:
               ncnn::Mat out(outW, outH, 3);
               out.fill(0.f);
 
-              const int TILE_SIZE = 160;
-              const int PAD = 18;
+              const int TILE_SIZE = 128;
+              const int PAD = 10;
 
               for (int y = 0; y < h; y += TILE_SIZE) {
                   for (int x = 0; x < w; x += TILE_SIZE) {
@@ -185,9 +185,9 @@ jobs:
                       tileIn.substract_mean_normalize(0, norm_vals);
 
                       ncnn::Extractor ex = upscaler.create_extractor();
-                      ex.input("in0", tileIn);
+                      ex.input("data", tileIn);
                       ncnn::Mat tileOut;
-                      ex.extract("out0", tileOut);
+                      ex.extract("output", tileOut);
 
                       const float denorm_vals[3] = {255.0f, 255.0f, 255.0f};
                       tileOut.substract_mean_normalize(0, denorm_vals);
@@ -280,7 +280,7 @@ jobs:
                   root.addView(title);
 
                   statusText = new TextView(this);
-                  statusText.setText("Pick an image for 2x True Neural Reconstruction");
+                  statusText.setText("Pick an image for 4x Crisp Neural Reconstruction");
                   statusText.setTextColor(Color.parseColor("#A0A0B0"));
                   statusText.setPadding(0, 8, 0, 24);
                   root.addView(statusText);
@@ -297,7 +297,7 @@ jobs:
                   root.addView(gpuSwitch);
 
                   TextView sliderLabel = new TextView(this);
-                  sliderLabel.setText("Crisp Edge Boost (Anti-Blur):");
+                  sliderLabel.setText("Crisp Edge Recovery Boost:");
                   sliderLabel.setTextColor(Color.WHITE);
                   sliderLabel.setPadding(0, 16, 0, 8);
                   root.addView(sliderLabel);
@@ -321,7 +321,7 @@ jobs:
                   });
 
                   Button btnRun = new Button(this);
-                  btnRun.setText("2. Upscale");
+                  btnRun.setText("2. Upscale 4x");
                   btnRun.setOnClickListener(v -> runUpscale());
 
                   Button btnSave = new Button(this);
@@ -352,7 +352,7 @@ jobs:
 
               private void runUpscale() {
                   if (selectedBitmap == null) return;
-                  statusText.setText("Upscaling on GPU... Please wait.");
+                  statusText.setText("Upscaling 4x on GPU... Please wait.");
                   boolean useGpu = gpuSwitch.isChecked();
                   float boost = crispSlider.getProgress() / 50.0f;
                   executor.execute(() -> {
@@ -400,13 +400,16 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           echo "ndk.dir=$ANDROID_HOME/ndk/26.1.10909125" >> local.properties
 
-      - name: Download NCNN Vulkan Engine & Real-CUGAN Sharp Model
+      - name: Download NCNN Vulkan Engine & Real-ESRGAN Crisp Models
         run: |
-          wget -q https://github.com/Tencent/ncnn/releases/download/20240820/ncnn-20240820-android-vulkan-shared.zip
-          unzip -q ncnn-20240820-android-vulkan-shared.zip -d app/src/main/cpp/
+          curl -L -s https://github.com/Tencent/ncnn/releases/download/20240820/ncnn-20240820-android-vulkan-shared.zip -o ncnn.zip
+          unzip -q ncnn.zip -d app/src/main/cpp/
           mv app/src/main/cpp/ncnn-20240820-android-vulkan-shared app/src/main/cpp/ncnn
-          wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.param -O app/src/main/assets/cugan_sharp.param
-          wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.bin -O app/src/main/assets/cugan_sharp.bin
+
+          curl -L -s https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/realesrgan-ncnn-vulkan-20220424-ubuntu.zip -o models.zip
+          unzip -q models.zip
+          cp realesrgan-ncnn-vulkan-20220424-ubuntu/models/realesr-animevideov3-x4.bin app/src/main/assets/model.bin
+          cp realesrgan-ncnn-vulkan-20220424-ubuntu/models/realesr-animevideov3-x4.param app/src/main/assets/model.param
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
