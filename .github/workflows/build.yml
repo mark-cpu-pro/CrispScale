@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - name: Generate Entire Android Project Automatically
@@ -48,6 +49,8 @@ jobs:
           android {
               namespace 'com.crispscale.ai'
               compileSdk 34
+              ndkVersion "26.1.10909125"
+
               defaultConfig {
                   applicationId "com.crispscale.ai"
                   minSdk 26
@@ -392,6 +395,11 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Accept Android Licenses & Link Preinstalled NDK
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          echo "ndk.dir=$ANDROID_HOME/ndk/26.1.10909125" >> local.properties
+
       - name: Download NCNN Vulkan Engine & Real-CUGAN Sharp Model
         run: |
           wget -q https://github.com/Tencent/ncnn/releases/download/20240820/ncnn-20240820-android-vulkan-shared.zip
@@ -400,13 +408,13 @@ jobs:
           wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.param -O app/src/main/assets/cugan_sharp.param
           wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.bin -O app/src/main/assets/cugan_sharp.bin
 
-      - name: Install Gradle
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
       - name: Compile Debug APK
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --parallel
 
       - name: Upload Ready APK
         uses: actions/upload-artifact@v4
