@@ -1,0 +1,418 @@
+name: Build CrispScale APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Entire Android Project Automatically
+        run: |
+          mkdir -p app/src/main/cpp
+          mkdir -p app/src/main/java/com/crispscale/ai
+          mkdir -p app/src/main/assets
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "CrispScale"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.3.0' apply false
+          }
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.crispscale.ai'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.crispscale.ai"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+                  ndk {
+                      abiFilters 'arm64-v8a'
+                  }
+                  externalNativeBuild {
+                      cmake {
+                          arguments "-DANDROID_STL=c++_shared"
+                          cppFlags "-std=c++17 -O3"
+                      }
+                  }
+              }
+              externalNativeBuild {
+                  cmake {
+                      path "src/main/cpp/CMakeLists.txt"
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:label="CrispScale AI"
+                  android:supportsRtl="true"
+                  android:largeHeap="true"
+                  android:theme="@style/Theme.Material3.Dark.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/cpp/CMakeLists.txt
+          cmake_minimum_required(VERSION 3.18.1)
+          project("crispscale")
+          set(ncnn_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ncnn/${ANDROID_ABI}/lib/cmake/ncnn)
+          find_package(ncnn REQUIRED)
+          add_library(crispscale SHARED native-lib.cpp)
+          target_link_libraries(crispscale ncnn jnigraphics android log)
+          EOF
+
+          cat << 'EOF' > app/src/main/cpp/native-lib.cpp
+          #include <jni.h>
+          #include <android/asset_manager_jni.h>
+          #include <android/bitmap.h>
+          #include <vector>
+          #include <algorithm>
+          #include "net.h"
+          #include "gpu.h"
+
+          static ncnn::Net upscaler;
+          static bool model_loaded = false;
+
+          extern "C" JNIEXPORT jboolean JNICALL
+          Java_com_crispscale_ai_MainActivity_initModel(JNIEnv* env, jobject, jobject assetManager, jboolean useGpu) {
+              if (model_loaded) return JNI_TRUE;
+              AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
+              if (useGpu && ncnn::get_gpu_count() > 0) {
+                  upscaler.opt.use_vulkan_compute = true;
+                  upscaler.opt.use_fp16_packed = true;
+                  upscaler.opt.use_fp16_storage = true;
+              } else {
+                  upscaler.opt.use_vulkan_compute = false;
+              }
+              int ret1 = upscaler.load_param(mgr, "cugan_sharp.param");
+              int ret2 = upscaler.load_model(mgr, "cugan_sharp.bin");
+              model_loaded = (ret1 == 0 && ret2 == 0);
+              return model_loaded ? JNI_TRUE : JNI_FALSE;
+          }
+
+          extern "C" JNIEXPORT jobject JNICALL
+          Java_com_crispscale_ai_MainActivity_upscaleImage(JNIEnv* env, jobject, jobject inBitmap, jfloat crispnessBoost) {
+              AndroidBitmapInfo info;
+              if (AndroidBitmap_getInfo(env, inBitmap, &info) < 0) return nullptr;
+              void* inPixels;
+              if (AndroidBitmap_lockPixels(env, inBitmap, &inPixels) < 0) return nullptr;
+
+              int w = info.width, h = info.height, scale = 2;
+              int outW = w * scale, outH = h * scale;
+
+              ncnn::Mat in = ncnn::Mat::from_pixels((const unsigned char*)inPixels, ncnn::Mat::PIXEL_RGBA2RGB, w, h);
+              AndroidBitmap_unlockPixels(env, inBitmap);
+
+              jclass bitmapCls = env->FindClass("android/graphics/Bitmap");
+              jmethodID createBitmapMethod = env->GetStaticMethodID(bitmapCls, "createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+              jclass configCls = env->FindClass("android/graphics/Bitmap$Config");
+              jfieldID argb8888Field = env->GetStaticFieldID(configCls, "ARGB_8888", "Landroid/graphics/Bitmap$Config;");
+              jobject config = env->GetStaticObjectField(configCls, argb8888Field);
+              jobject outBitmap = env->CallStaticObjectMethod(bitmapCls, createBitmapMethod, outW, outH, config);
+
+              void* outPixels;
+              AndroidBitmap_lockPixels(env, outBitmap, &outPixels);
+
+              ncnn::Mat out(outW, outH, 3);
+              out.fill(0.f);
+
+              const int TILE_SIZE = 160;
+              const int PAD = 18;
+
+              for (int y = 0; y < h; y += TILE_SIZE) {
+                  for (int x = 0; x < w; x += TILE_SIZE) {
+                      int tileW = std::min(TILE_SIZE, w - x);
+                      int tileH = std::min(TILE_SIZE, h - y);
+                      int inX0 = std::max(0, x - PAD), inY0 = std::max(0, y - PAD);
+                      int inX1 = std::min(w, x + tileW + PAD), inY1 = std::min(h, y + tileH + PAD);
+
+                      ncnn::Mat tileIn;
+                      ncnn::copy_cut_border(in, tileIn, inY0, h - inY1, inX0, w - inX1);
+
+                      const float norm_vals[3] = {1 / 255.0f, 1 / 255.0f, 1 / 255.0f};
+                      tileIn.substract_mean_normalize(0, norm_vals);
+
+                      ncnn::Extractor ex = upscaler.create_extractor();
+                      ex.input("in0", tileIn);
+                      ncnn::Mat tileOut;
+                      ex.extract("out0", tileOut);
+
+                      const float denorm_vals[3] = {255.0f, 255.0f, 255.0f};
+                      tileOut.substract_mean_normalize(0, denorm_vals);
+
+                      int cropX = (x - inX0) * scale, cropY = (y - inY0) * scale;
+                      for (int c = 0; c < 3; c++) {
+                          const float* srcPtr = tileOut.channel(c);
+                          float* dstPtr = out.channel(c);
+                          for (int ty = 0; ty < tileH * scale; ty++) {
+                              for (int tx = 0; tx < tileW * scale; tx++) {
+                                  int sy = cropY + ty, sx = cropX + tx;
+                                  if (sy < tileOut.h && sx < tileOut.w) {
+                                      dstPtr[(y * scale + ty) * outW + (x * scale + tx)] = std::clamp(srcPtr[sy * tileOut.w + sx], 0.0f, 255.0f);
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              if (crispnessBoost > 0.01f) {
+                  ncnn::Mat sharpened(outW, outH, 3);
+                  for (int c = 0; c < 3; c++) {
+                      const float* src = out.channel(c);
+                      float* dst = sharpened.channel(c);
+                      for (int y = 1; y < outH - 1; y++) {
+                          for (int x = 1; x < outW - 1; x++) {
+                              float center = src[y * outW + x];
+                              float neighbors = (src[(y - 1) * outW + x] + src[(y + 1) * outW + x] +
+                                                 src[y * outW + (x - 1)] + src[y * outW + (x + 1)]) * 0.25f;
+                              dst[y * outW + x] = std::clamp(center + (center - neighbors) * crispnessBoost, 0.0f, 255.0f);
+                          }
+                      }
+                  }
+                  out = sharpened;
+              }
+
+              out.to_pixels((unsigned char*)outPixels, ncnn::Mat::PIXEL_RGB2RGBA);
+              AndroidBitmap_unlockPixels(env, outBitmap);
+              return outBitmap;
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/crispscale/ai/MainActivity.java
+          package com.crispscale.ai;
+
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.content.res.AssetManager;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.view.Gravity;
+          import android.widget.*;
+          import androidx.appcompat.app.AppCompatActivity;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          public class MainActivity extends AppCompatActivity {
+              static { System.loadLibrary("crispscale"); }
+              public native boolean initModel(AssetManager mgr, boolean useGpu);
+              public native Bitmap upscaleImage(Bitmap inBitmap, float crispnessBoost);
+
+              private ImageView imageView;
+              private TextView statusText;
+              private SeekBar crispSlider;
+              private Switch gpuSwitch;
+              private Bitmap selectedBitmap, upscaledBitmap;
+              private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.parseColor("#121216"));
+                  root.setPadding(36, 48, 36, 36);
+
+                  TextView title = new TextView(this);
+                  title.setText("CrispScale Vulkan AI");
+                  title.setTextSize(22f);
+                  title.setTextColor(Color.WHITE);
+                  root.addView(title);
+
+                  statusText = new TextView(this);
+                  statusText.setText("Pick an image for 2x True Neural Reconstruction");
+                  statusText.setTextColor(Color.parseColor("#A0A0B0"));
+                  statusText.setPadding(0, 8, 0, 24);
+                  root.addView(statusText);
+
+                  imageView = new ImageView(this);
+                  imageView.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+                  imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  root.addView(imageView);
+
+                  gpuSwitch = new Switch(this);
+                  gpuSwitch.setText("Use Vulkan GPU Acceleration");
+                  gpuSwitch.setTextColor(Color.WHITE);
+                  gpuSwitch.setChecked(true);
+                  root.addView(gpuSwitch);
+
+                  TextView sliderLabel = new TextView(this);
+                  sliderLabel.setText("Crisp Edge Boost (Anti-Blur):");
+                  sliderLabel.setTextColor(Color.WHITE);
+                  sliderLabel.setPadding(0, 16, 0, 8);
+                  root.addView(sliderLabel);
+
+                  crispSlider = new SeekBar(this);
+                  crispSlider.setMax(100);
+                  crispSlider.setProgress(45);
+                  root.addView(crispSlider);
+
+                  LinearLayout btnRow = new LinearLayout(this);
+                  btnRow.setOrientation(LinearLayout.HORIZONTAL);
+                  btnRow.setGravity(Gravity.CENTER);
+                  btnRow.setPadding(0, 24, 0, 0);
+
+                  Button btnPick = new Button(this);
+                  btnPick.setText("1. Pick");
+                  btnPick.setOnClickListener(v -> {
+                      Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                      intent.setType("image/*");
+                      startActivityForResult(intent, 100);
+                  });
+
+                  Button btnRun = new Button(this);
+                  btnRun.setText("2. Upscale");
+                  btnRun.setOnClickListener(v -> runUpscale());
+
+                  Button btnSave = new Button(this);
+                  btnSave.setText("3. Save PNG");
+                  btnSave.setOnClickListener(v -> saveImage());
+
+                  btnRow.addView(btnPick);
+                  btnRow.addView(btnRun);
+                  btnRow.addView(btnSave);
+                  root.addView(btnRow);
+                  setContentView(root);
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req == 100 && res == Activity.RESULT_OK && data != null) {
+                      try {
+                          InputStream is = getContentResolver().openInputStream(data.getData());
+                          selectedBitmap = BitmapFactory.decodeStream(is);
+                          imageView.setImageBitmap(selectedBitmap);
+                          statusText.setText("Loaded: " + selectedBitmap.getWidth() + "x" + selectedBitmap.getHeight() + "px");
+                      } catch (Exception e) {
+                          statusText.setText("Failed to load image.");
+                      }
+                  }
+              }
+
+              private void runUpscale() {
+                  if (selectedBitmap == null) return;
+                  statusText.setText("Upscaling on GPU... Please wait.");
+                  boolean useGpu = gpuSwitch.isChecked();
+                  float boost = crispSlider.getProgress() / 50.0f;
+                  executor.execute(() -> {
+                      long start = System.currentTimeMillis();
+                      if (!initModel(getAssets(), useGpu)) {
+                          runOnUiThread(() -> statusText.setText("Model init failed."));
+                          return;
+                      }
+                      upscaledBitmap = upscaleImage(selectedBitmap, boost);
+                      long sec = (System.currentTimeMillis() - start) / 1000;
+                      runOnUiThread(() -> {
+                          imageView.setImageBitmap(upscaledBitmap);
+                          statusText.setText("Done in " + sec + "s! (" + upscaledBitmap.getWidth() + "x" + upscaledBitmap.getHeight() + "px)");
+                      });
+                  });
+              }
+
+              private void saveImage() {
+                  if (upscaledBitmap == null) return;
+                  try {
+                      ContentValues values = new ContentValues();
+                      values.put(MediaStore.Images.Media.DISPLAY_NAME, "CrispScale_" + System.currentTimeMillis() + ".png");
+                      values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+                      values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/CrispScale");
+                      Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                      OutputStream out = getContentResolver().openOutputStream(uri);
+                      upscaledBitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+                      out.close();
+                      Toast.makeText(this, "Saved to Pictures/CrispScale!", Toast.LENGTH_LONG).show();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Save failed.", Toast.LENGTH_SHORT).show();
+                  }
+              }
+          }
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download NCNN Vulkan Engine & Real-CUGAN Sharp Model
+        run: |
+          wget -q https://github.com/Tencent/ncnn/releases/download/20240820/ncnn-20240820-android-vulkan-shared.zip
+          unzip -q ncnn-20240820-android-vulkan-shared.zip -d app/src/main/cpp/
+          mv app/src/main/cpp/ncnn-20240820-android-vulkan-shared app/src/main/cpp/ncnn
+          wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.param -O app/src/main/assets/cugan_sharp.param
+          wget -q https://github.com/nihui/realcugan-ncnn-vulkan/raw/master/models/models-se/up2x-latest-denoise3x.bin -O app/src/main/assets/cugan_sharp.bin
+
+      - name: Install Gradle & Build APK
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Compile Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload Ready APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrispScale-Ready-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
